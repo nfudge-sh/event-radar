@@ -1,0 +1,31 @@
+name: event-radar
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # runs every 30 minutes
+  workflow_dispatch:         # lets you run manually
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run radar
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python radar.py
+
+      - name: Save dedupe cache
+        run: |
+          git config user.email "bot@example.com"
+          git config user.name "event-radar-bot"
+          git add seen.json || true
+          git commit -m "update cache" || true
+          git push || true
