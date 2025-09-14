@@ -1,7 +1,7 @@
 name: event-radar
 on:
   schedule:
-    - cron: "0 13 * * *"   # runs every 30 minutes
+    - cron: "0 13 * * *"   # runs everyday 9AM EST
   workflow_dispatch:         # lets you run manually
 jobs:
   run:
