@@ -1,5 +1,7 @@
+# radar.py
 import os, re, json, time, hashlib, requests, feedparser, datetime as dt
 from email.utils import parsedate_to_datetime
+from providers import get_all_feeds
 
 # =========================
 # Tunables
@@ -7,6 +9,7 @@ from email.utils import parsedate_to_datetime
 MAX_POSTS = 30                 # cap daily posts
 MAX_AGE_HOURS = 72             # only keep items published in last 72h
 DEDUP_DAYS = 3                 # rolling dedupe window
+ENTRIES_PER_FEED = 250         # scan deeper per feed page
 SLACK_WEBHOOK = os.environ["SLACK_WEBHOOK_URL"]
 DAILY_BUCKET = dt.date.today().isoformat()
 
@@ -14,14 +17,16 @@ DAILY_BUCKET = dt.date.today().isoformat()
 # Filters
 # =========================
 INCLUDE_PHRASES = [
-    "announces tour","announced tour","announce tour",
+    # music/event announces
+    "announces tour","announced tour","announce tour","announces dates","announced dates","sets dates","confirms dates",
     "world tour","stadium tour","arena tour",
-    "tour dates","dates announced","adds dates","new dates","extra date","second show",
-    "residency","headline show","headlining show",
+    "tour dates","dates announced","adds dates","new dates","extra date","second show","adds second night",
+    "residency","headline show","headlining show","festival lineup","lineup announced","line-up announced",
     "tickets on sale","ticket pre-sale","presale","pre-sale","on sale",
-    "fixture list","fixtures announced","schedule released","schedule announced",
-    "draw announced","host city announced","host selected","host city selected",
-    "venue change","changed venue","moved to","relocated","rescheduled","date change",
+    # sports fixtures / venues
+    "fixture list","fixtures announced","fixtures confirmed","schedule released","schedule announced","match schedule",
+    "draw announced","draw made","host city announced","host selected","host city selected",
+    "venue change","changed venue","venue confirmed","moved to","relocated","rescheduled","date change",
 ]
 ALWAYS_ALLOW = [
     "olympics","fifa world cup","uefa euro","copa américa","copa america",
@@ -75,45 +80,7 @@ SIG_PATTERNS = [
 ]
 SIG_REGEX = re.compile("|".join(SIG_PATTERNS), re.IGNORECASE)
 
-# =========================
-# Feeds (concerts, venues, sports, federations)
-# =========================
-FEEDS = [
-    # Music / trades
-    "https://www.billboard.com/feed/","https://www.pollstar.com/feed","https://variety.com/feed/",
-    "https://www.rollingstone.com/feed/","https://consequence.net/feed/","https://www.nme.com/feed",
-    "https://www.spin.com/feed/","https://www.vulture.com/rss/music.xml","https://pitchfork.com/feed/",
-    "https://www.stereogum.com/feed/","https://www.jambase.com/feed","https://www.udiscovermusic.com/feed/",
-    "https://www.kerrang.com/feed.xml",
-    # Ticketing
-    "https://blog.ticketmaster.com/feed/","https://www.livenationentertainment.com/feed/",
-    "https://www.ticketmaster.co.uk/blog/feed/","https://blog.ticketmaster.com.au/feed/","https://www.ticketmaster.de/magazin/feed/",
-    "https://www.aegpresents.co.uk/feed/",
-    # Festivals
-    "https://www.coachella.com/feed/","https://www.glastonburyfestivals.co.uk/feed/","https://www.lollapalooza.com/feed/",
-    "https://www.rockwerchter.be/en/rss","https://primaverasound.com/en/rss","https://readingandleedsfestival.com/feed/",
-    "https://splendourinthegrass.com/feed/","https://fujirockfestival.com/feed/",
-    # Venues
-    "https://www.wembleystadium.com/rss","https://www.theo2.co.uk/rss","https://www.sofistadium.com/feed/",
-    "https://accorarena.com/en/feed/","https://www.ao-arena.com/rss","https://www.3arena.ie/feed/",
-    "https://www.rodlaverarena.com.au/feed/","https://www.scotiabankarena.com/feed/","https://www.ssearena.co.uk/rss",
-    "https://www.etihadarena.ae/en/media-centre/rss","https://www.spark-arena.co.nz/feed/",
-    # Sports wires
-    "https://feeds.bbci.co.uk/sport/rss.xml","https://www.espn.com/espn/rss/news","https://espnpressroom.com/us/feed/",
-    "https://www.reuters.com/rssFeed/sportsNews",
-    # Federations / competitions
-    "https://www.fifa.com/rss-feeds/index.xml","https://www.uefa.com/rssfeed/uefachampionsleague.rss",
-    "https://www.uefa.com/rssfeed/uefaeuropaleague.rss","https://www.uefa.com/rssfeed/uefaconferenceleague.rss",
-    "https://www.uefa.com/rssfeed/uefaeuro.rss","https://www.uefa.com/rssfeed/uefanationsleague.rss",
-    "https://www.olympics.com/en/news/rss","https://www.icc-cricket.com/rss/news","https://www.formula1.com/content/fom-website/en/latest/all.xml",
-    # Leagues
-    "https://www.bundesliga.com/en/bundesliga/rss","https://www.legaseriea.it/en/rss","https://ligue1.com/rss",
-    "https://www.laliga.com/rss","https://www.mlssoccer.com/feeds/rss/news.xml","https://eredivisie.nl/feed/",
-    "https://www.ligaportugal.pt/en/media/rss","https://www.efl.com/rss/news.xml","https://www.cbf.com.br/rss",
-    "https://www.premierleague.com/news.rss",
-    # Federations (national)
-    "https://www.thefa.com/news.rss","https://www.scottishfa.co.uk/feed/","https://www.figc.it/en/news/rss/","https://www.afa.com.ar/feed",
-]
+WEAK_EVENT_WORDS = ["tour","concert","show","dates","tickets","presale","pre-sale","fixture","match","venue","lineup","line-up"]
 
 # =========================
 # Dedupe storage
@@ -149,15 +116,22 @@ def entry_datetime(e):
             try: return dt.datetime(*val[:6], tzinfo=dt.timezone.utc)
             except: pass
     return None
-def is_recent(e): 
+def is_recent(e):
     d=entry_datetime(e)
     if not d: return False
     if not d.tzinfo: d=d.replace(tzinfo=dt.timezone.utc)
     return (dt.datetime.now(dt.timezone.utc)-d).total_seconds() <= MAX_AGE_HOURS*3600
+def artist_event_match(text: str) -> bool:
+    t = text.lower()
+    if any(a.lower() in t for a in ARTISTS):
+        if any(w in t for w in WEAK_EVENT_WORDS):
+            return True
+    return False
 def is_relevant(text):
     if any_in(text,EXCLUDE_PHRASES): return False
     if any_in(text,ALWAYS_ALLOW): return True
-    return any_in(text,INCLUDE_PHRASES)
+    if any_in(text,INCLUDE_PHRASES): return True
+    return artist_event_match(text)
 def detect_country(text):
     t=text.lower()
     for c,cl in zip(COUNTRIES,COUNTRIES_LOWER):
@@ -175,15 +149,17 @@ def detect_artist(text):
 def signal_category(text):
     t=text.lower()
     if any(p in t for p in ["venue change","changed venue","moved to","relocated","rescheduled","date change"]): return "VENUE_CHANGE"
-    if any(p in t for p in ["fixture","schedule released","draw announced"]): return "SCHEDULE"
-    if any(p in t for p in ["tickets on sale","pre-sale","presale"]): return "TICKETS"
-    if any(p in t for p in ["tour dates","adds dates","new dates","extra date","second show"]): return "DATES"
+    if any(p in t for p in ["fixture","schedule released","fixtures announced","draw announced","draw made"]): return "SCHEDULE"
+    if any(p in t for p in ["tickets on sale","pre-sale","presale","on sale"]): return "TICKETS"
+    if any(p in t for p in ["tour dates","adds dates","new dates","extra date","second show","adds second night"]): return "DATES"
     if any(p in t for p in ["announces tour","announced tour","world tour","stadium tour","arena tour"]): return "TOUR"
     if any(p in t for p in ["olympics","fifa world cup","uefa euro","super bowl","icc cricket world cup"]): return "MEGA"
     return "GEN"
 def score_item(title,summary):
     t=(title+" "+summary).lower(); s=0
-    for k in ["announces tour","tour dates","world tour","stadium tour","residency","adds dates","tickets on sale","fixture","schedule released","draw announced","venue change","relocated","moved to","rescheduled"]:
+    for k in ["announces tour","tour dates","world tour","stadium tour","residency",
+              "adds dates","tickets on sale","fixture","fixtures announced","schedule released","draw announced",
+              "venue change","relocated","moved to","rescheduled"]:
         if k in t: s+=4
     if any(a.lower() in t for a in ARTISTS): s+=3
     if any(m in t for m in ALWAYS_ALLOW): s+=5
@@ -197,56 +173,61 @@ def post_to_slack(title,link,source,country="",signal=""):
     r=requests.post(SLACK_WEBHOOK,json=payload,timeout=15)
     print("Slack:",r.status_code,r.text[:120])
 
-# =========================
-# Collect (250 entries per feed)
-# =========================
-candidates=[]
-for url in FEEDS:
-    try: feed=feedparser.parse(url)
-    except: continue
-    for e in feed.entries[:250]:
-        if not is_recent(e): continue
-        title=getattr(e,"title","") or ""; link=getattr(e,"link","") or ""
-        summary=getattr(e,"summary","") or ""; source=getattr(e,"source",{}).get("title","") or url
-        if not title or not link: continue
-        blob=f"{title} {summary}"
-        if not is_relevant(blob): continue
-        candidates.append({
-            "title":title,"url":link,"source":source,"blob":blob,
-            "score":score_item(title,summary),"artist":detect_artist(blob),
-            "country":detect_country(blob),"signal":detect_signal(blob),
-            "category":signal_category(blob),"title_key":canonical_key(title)
-        })
+def make_event_key(artist,country,category,title_key=None):
+    if not artist:
+        return f"{(country or 'UNK').lower()}|{category}|{title_key or 'NA'}"
+    return f"{artist.lower()}|{(country or 'UNK').lower()}|{category}"
 
 # =========================
-# Dedupe + Rank
+# Collect → Filter → Score
 # =========================
-def make_event_key(artist,country,category): 
-    return f"{(artist or 'UNK').lower()}|{(country or 'UNK').lower()}|{category}"
+def run():
+    feeds = get_all_feeds()
+    candidates=[]
+    for url in feeds:
+        try: feed=feedparser.parse(url)
+        except Exception as e:
+            print("Feed error:", url, e); continue
+        for e in feed.entries[:ENTRIES_PER_FEED]:
+            if not is_recent(e): continue
+            title=getattr(e,"title","") or ""; link=getattr(e,"link","") or ""
+            summary=getattr(e,"summary","") or ""; source=getattr(e,"source",{}).get("title","") or url
+            if not title or not link: continue
+            blob=f"{title} {summary}"
+            if not is_relevant(blob): continue
+            candidates.append({
+                "title":title,"url":link,"source":source,"blob":blob,
+                "score":score_item(title,summary),"artist":detect_artist(blob),
+                "country":detect_country(blob),"signal":detect_signal(blob),
+                "category":signal_category(blob),"title_key":canonical_key(title)
+            })
 
-final=[]
-for c in sorted(candidates,key=lambda x:(-x["score"],x["title"])):
-    if c["title_key"] in titles_seen: continue
-    if c["artist"] and c["artist"] in artists_seen: continue
-    ek=make_event_key(c["artist"],c["country"],c["category"])
-    if ek in recent_event_keys: continue
-    final.append(c)
-    titles_seen.add(c["title_key"])
-    if c["artist"]: artists_seen.add(c["artist"])
-    recent_event_keys.add(ek); event_keys_list.append({"date":DAILY_BUCKET,"key":ek})
-    if len(final)>=MAX_POSTS: break
+    # Dedupe + Rank
+    final=[]
+    for c in sorted(candidates,key=lambda x:(-x["score"],x["title"])):
+        if c["title_key"] in titles_seen: continue
+        if c["artist"] and c["artist"] in artists_seen: continue
+        ek=make_event_key(c["artist"],c["country"],c["category"],c["title_key"])
+        if ek in recent_event_keys: continue
+        final.append(c)
+        titles_seen.add(c["title_key"])
+        if c["artist"]: artists_seen.add(c["artist"])
+        recent_event_keys.add(ek); event_keys_list.append({"date":DAILY_BUCKET,"key":ek})
+        if len(final)>=MAX_POSTS: break
 
-# =========================
-# Post
-# =========================
-for c in final:
-    try: post_to_slack(c["title"],c["url"],c["source"],c["country"],c["signal"]); time.sleep(1)
-    except Exception as e: print("Post error:",e)
+    # Post
+    for c in final:
+        try:
+            post_to_slack(c["title"],c["url"],c["source"],c["country"],c["signal"])
+            time.sleep(1)
+        except Exception as e:
+            print("Post error:",e)
 
-# =========================
-# Save state
-# =========================
-seen[DAILY_BUCKET]={"titles":list(titles_seen),"artists":list(artists_seen)}
-seen["event_keys"]=event_keys_list
-json.dump(seen,open(SEEN_PATH,"w"))
-print(f"checked={len(candidates)} posted={len(final)}")
+    # Save state
+    seen[DAILY_BUCKET]={"titles":list(titles_seen),"artists":list(artists_seen)}
+    seen["event_keys"]=event_keys_list
+    with open(SEEN_PATH,"w") as f: json.dump(seen,f)
+    print(f"checked={len(candidates)} posted={len(final)}")
+
+if __name__ == "__main__":
+    run()
