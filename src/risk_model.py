@@ -1,36 +1,25 @@
 """
-Risk scoring model for upcoming fixtures.
-You can expand these heuristics as needed.
+Risk scoring model — rivalry-first.
+- Uses rivalry/alias DB so rivalries ALWAYS surface.
+- Other signals remain additive and tunable.
 """
 
 from typing import Tuple, Dict
+from rivalries import detect_rivalry
 
 
-def rivalry_bonus(home: str, away: str) -> int:
+def rivalry_bonus(home: str, away: str, sport_hint: str = "") -> Tuple[int, str, bool]:
     """
-    Simple hardcoded rivalry list.
-    You can expand this list with more derbies.
+    Returns (points, label, is_rivalry).
+    Points are high enough to guarantee the match clears any HIGH threshold.
     """
-    name = f"{home.lower()} vs {away.lower()}"
-    rivalries = [
-        ("barcelona", "real madrid"),    # El Clásico
-        ("celtic", "rangers"),
-        ("arsenal", "tottenham"),
-        ("manchester united", "liverpool"),
-        ("boca juniors", "river plate"),
-        ("fenerbahce", "galatasaray"),
-    ]
-    for a, b in rivalries:
-        if (a in home.lower() and b in away.lower()) or (b in home.lower() and a in away.lower()):
-            return 30
-    return 0
+    is_riv, pts, label = detect_rivalry(home, away, sport_hint or None)
+    if is_riv:
+        return pts, label or "Rivalry/Derby", True
+    return 0, "", False
 
 
 def schedule_congestion() -> int:
-    """
-    Stub for fixture congestion (back-to-back games).
-    Could be extended to look at actual fixture density.
-    """
     return 0
 
 
@@ -44,53 +33,44 @@ def venue_signal(neutral: bool = False, recently_moved: bool = False) -> int:
 
 
 def weather_signal(severity: float = 0.0) -> int:
-    """
-    Map weather severity (0.0 – 1.0) to points.
-    """
     return int(severity * 20)
 
 
 def compute_risk(match: Dict, ctx: Dict) -> Tuple[int, str]:
     """
-    Compute a risk score for a given match.
+    Compute a risk score for a given match dict:
+    expects match["home"], match["away"]; optional ctx["sport_hint"].
     """
     reasons = []
-
     score = 0
 
-    # Rivalry weight
-    if ctx.get("rivalry", 0):
-        score += ctx["rivalry"]
-        reasons.append("Rivalry/Derby")
+    # 1) Rivalry: dominant
+    rv_pts, rv_label, is_rival = rivalry_bonus(
+        match.get("home", ""), match.get("away", ""), ctx.get("sport_hint", "")
+    )
+    if rv_pts > 0:
+        score += rv_pts
+        reasons.append(rv_label or "Rivalry")
 
-    # Venue issues
-    if ctx.get("venue", 0):
-        score += ctx["venue"]
-        reasons.append("Venue considerations")
+    # 2) Other additive signals
+    for key, label in [
+        ("venue", "Venue considerations"),
+        ("weather", "Weather risk"),
+        ("congestion", "Congested schedule"),
+        ("odds_vol", "Betting volatility"),
+        ("travel", "Travel disruption"),
+        ("catalog_flags", "Catalog flags"),
+    ]:
+        val = ctx.get(key, 0)
+        if val:
+            score += val
+            reasons.append(label)
 
-    # Weather
-    if ctx.get("weather", 0):
-        score += ctx["weather"]
-        reasons.append("Weather risk")
+    # Bound score to 100
+    score = min(score, 100)
 
-    # Schedule congestion
-    if ctx.get("congestion", 0):
-        score += ctx["congestion"]
-        reasons.append("Congested schedule")
-
-    # Odds / volatility placeholder
-    if ctx.get("odds_vol", 0):
-        score += ctx["odds_vol"]
-        reasons.append("Betting volatility")
-
-    # Travel issues
-    if ctx.get("travel", 0):
-        score += ctx["travel"]
-        reasons.append("Travel disruption")
-
-    # Catalog / flags
-    if ctx.get("catalog_flags", 0):
-        score += ctx["catalog_flags"]
-        reasons.append("Catalog flags")
+    # If rivalry, guarantee surfacing downstream by tagging in reasons
+    if is_rival and "Rivalry" not in " ".join(reasons):
+        reasons.append("Rivalry")
 
     return score, ", ".join(reasons) if reasons else "Low baseline risk"
