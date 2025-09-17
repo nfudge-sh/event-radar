@@ -1,2 +1,5 @@
-feedparser
 requests
+python-dateutil
+pytz
+beautifulsoup4
+lxml
