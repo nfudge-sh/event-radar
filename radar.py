@@ -198,13 +198,13 @@ def post_to_slack(title,link,source,country="",signal=""):
     print("Slack:",r.status_code,r.text[:120])
 
 # =========================
-# Collect
+# Collect (250 entries per feed)
 # =========================
 candidates=[]
 for url in FEEDS:
     try: feed=feedparser.parse(url)
     except: continue
-    for e in feed.entries[:40]:
+    for e in feed.entries[:250]:
         if not is_recent(e): continue
         title=getattr(e,"title","") or ""; link=getattr(e,"link","") or ""
         summary=getattr(e,"summary","") or ""; source=getattr(e,"source",{}).get("title","") or url
@@ -221,7 +221,9 @@ for url in FEEDS:
 # =========================
 # Dedupe + Rank
 # =========================
-def make_event_key(artist,country,category): return f"{(artist or 'UNK').lower()}|{(country or 'UNK').lower()}|{category}"
+def make_event_key(artist,country,category): 
+    return f"{(artist or 'UNK').lower()}|{(country or 'UNK').lower()}|{category}"
+
 final=[]
 for c in sorted(candidates,key=lambda x:(-x["score"],x["title"])):
     if c["title_key"] in titles_seen: continue
