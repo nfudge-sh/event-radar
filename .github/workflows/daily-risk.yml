@@ -1,0 +1,52 @@
+name: Daily INTL Footy Risk
+
+on:
+  schedule:
+    - cron: "0 9 * * *"   # daily 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily report (ESPN scrape)
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SCAN_DAYS: "30"              # look 30 days ahead
+          DISPLAY_TZ: "America/New_York"
+          HIGH_CUTOFF: "55"            # lower to surface more “High”
+          MEDIUM_CUTOFF: "40"
+          TOP_N: "15"
+        run: python src/main.py
+
+      - name: Commit report
+        run: |
+          set -e
+          if [ -f report/latest.md ]; then
+            git config user.name  "github-actions"
+            git config user.email "github-actions@github.com"
+            git add report/latest.md
+            if git diff --cached --quiet; then
+              echo "No changes to commit."
+              exit 0
+            fi
+            git pull --rebase
+            git commit -m "Daily report update"
+            git push
+          else
+            echo "report/latest.md not found; skipping commit."
+          fi
